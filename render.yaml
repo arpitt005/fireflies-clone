@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: fireflies-clone-api
+    runtime: docker
+    rootDir: backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false
