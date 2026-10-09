@@ -20,16 +20,15 @@ from schemas import (
 )
 from seed import seed
 
-
 app = FastAPI(title="Fireflies Clone API", version="1.0.0")
 
 origins = [
-    origin.strip()
-    for origin in getenv(
+    item.strip()
+    for item in getenv(
         "ALLOWED_ORIGINS",
         "http://localhost:3000,http://127.0.0.1:3000",
     ).split(",")
-    if origin.strip()
+    if item.strip()
 ]
 
 app.add_middleware(
@@ -45,7 +44,7 @@ seed()
 
 
 def get_meeting_or_404(db: Session, meeting_id: int) -> Meeting:
-    statement = (
+    stmt = (
         select(Meeting)
         .options(
             selectinload(Meeting.participants),
@@ -54,16 +53,14 @@ def get_meeting_or_404(db: Session, meeting_id: int) -> Meeting:
         )
         .where(Meeting.id == meeting_id)
     )
-    meeting = db.scalar(statement)
-
+    meeting = db.scalar(stmt)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
-
     return meeting
 
 
 def meeting_to_response(meeting: Meeting) -> MeetingOut:
-    """Build the API response, including the derived participant_count field."""
+    """Build the API response and include the computed participant count."""
     return MeetingOut(
         id=meeting.id,
         title=meeting.title,
@@ -94,58 +91,37 @@ def list_meetings(
     to_date: Optional[date] = Query(default=None),
     sort: str = Query(default="recent"),
 ):
-    statement = select(Meeting).options(
-        selectinload(Meeting.participants)
-    )
+    stmt = select(Meeting).options(selectinload(Meeting.participants))
 
-    # Use relationship .any() filters instead of joining participants.
-    # This avoids duplicate joins and "ambiguous column name" SQL errors.
     if q and q.strip():
         needle = f"%{q.strip()}%"
-        statement = statement.where(
+        stmt = stmt.where(
             or_(
                 Meeting.title.ilike(needle),
-                Meeting.participants.any(
-                    Participant.name.ilike(needle)
-                ),
+                Meeting.participants.any(Participant.name.ilike(needle)),
             )
         )
 
     if participant and participant.strip():
-        participant_needle = f"%{participant.strip()}%"
-        statement = statement.where(
+        stmt = stmt.where(
             Meeting.participants.any(
-                Participant.name.ilike(participant_needle)
+                Participant.name.ilike(f"%{participant.strip()}%")
             )
         )
 
     if from_date:
-        statement = statement.where(
-            Meeting.meeting_date >= from_date
-        )
-
+        stmt = stmt.where(Meeting.meeting_date >= from_date)
     if to_date:
-        statement = statement.where(
-            Meeting.meeting_date <= to_date
-        )
+        stmt = stmt.where(Meeting.meeting_date <= to_date)
 
     if sort == "oldest":
-        statement = statement.order_by(
-            Meeting.meeting_date.asc(),
-            Meeting.id.asc(),
-        )
+        stmt = stmt.order_by(Meeting.meeting_date.asc(), Meeting.id.asc())
     elif sort == "title":
-        statement = statement.order_by(
-            Meeting.title.asc()
-        )
+        stmt = stmt.order_by(Meeting.title.asc())
     else:
-        statement = statement.order_by(
-            Meeting.meeting_date.desc(),
-            Meeting.id.desc(),
-        )
+        stmt = stmt.order_by(Meeting.meeting_date.desc(), Meeting.id.desc())
 
-    meetings = db.scalars(statement).all()
-
+    meetings = db.scalars(stmt).all()
     return [
         MeetingListOut(
             id=meeting.id,
@@ -159,20 +135,15 @@ def list_meetings(
     ]
 
 
+# Required by the meeting detail page when it opens a meeting.
 @app.get("/api/meetings/{meeting_id}", response_model=MeetingOut)
-def get_meeting(
-    meeting_id: int,
-    db: Session = Depends(get_db),
-):
-    meeting = get_meeting_or_404(db, meeting_id)
-    return meeting_to_response(meeting)
+def get_meeting(meeting_id: int, db: Session = Depends(get_db)):
+    return meeting_to_response(get_meeting_or_404(db, meeting_id))
 
 
+# Required by the New Meeting form.
 @app.post("/api/meetings", response_model=MeetingOut, status_code=201)
-def create_meeting(
-    payload: MeetingCreate,
-    db: Session = Depends(get_db),
-):
+def create_meeting(payload: MeetingCreate, db: Session = Depends(get_db)):
     meeting = Meeting(
         title=payload.title,
         meeting_date=payload.meeting_date,
@@ -183,13 +154,13 @@ def create_meeting(
     db.add(meeting)
     db.flush()
 
-    for participant in payload.participants:
+    for person in payload.participants:
         db.add(
             Participant(
                 meeting_id=meeting.id,
-                name=participant.name,
-                email=participant.email,
-                initials=participant.initials,
+                name=person.name,
+                email=person.email,
+                initials=person.initials,
             )
         )
 
@@ -205,8 +176,7 @@ def create_meeting(
         )
 
     db.commit()
-    saved_meeting = get_meeting_or_404(db, meeting.id)
-    return meeting_to_response(saved_meeting)
+    return meeting_to_response(get_meeting_or_404(db, meeting.id))
 
 
 @app.post(
@@ -223,21 +193,12 @@ async def upload_transcript(
     text = raw.decode("utf-8", errors="ignore")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # Replacing the transcript avoids duplicate segments on repeated uploads.
-    meeting.segments.clear()
-    db.flush()
-
     start = 0.0
     for line in lines[:500]:
         speaker = "Speaker"
         content = line
-
         if ":" in line:
-            speaker, content = [
-                part.strip()
-                for part in line.split(":", 1)
-            ]
-
+            speaker, content = [part.strip() for part in line.split(":", 1)]
         db.add(
             TranscriptSegment(
                 meeting_id=meeting.id,
@@ -249,13 +210,9 @@ async def upload_transcript(
         )
         start += 12
 
-    meeting.duration_seconds = int(
-        max(meeting.duration_seconds, start)
-    )
+    meeting.duration_seconds = int(max(meeting.duration_seconds, start))
     db.commit()
-
-    saved_meeting = get_meeting_or_404(db, meeting_id)
-    return meeting_to_response(saved_meeting)
+    return meeting_to_response(get_meeting_or_404(db, meeting_id))
 
 
 @app.put("/api/meetings/{meeting_id}", response_model=MeetingOut)
@@ -274,34 +231,29 @@ def update_meeting(
     if participants is not None:
         meeting.participants.clear()
         db.flush()
-
-        for participant in participants:
-            name = participant["name"]
-            initials = participant.get("initials") or "".join(
+        for person in participants:
+            name = person["name"]
+            initials = person.get("initials") or "".join(
                 part[0] for part in name.split()[:2]
             ).upper()
-
             meeting.participants.append(
                 Participant(
                     name=name,
-                    email=participant.get("email"),
+                    email=person.get("email"),
                     initials=initials,
                 )
             )
 
     db.commit()
-    saved_meeting = get_meeting_or_404(db, meeting_id)
-    return meeting_to_response(saved_meeting)
+    return meeting_to_response(get_meeting_or_404(db, meeting_id))
 
 
 @app.delete("/api/meetings/{meeting_id}", status_code=204)
-def delete_meeting(
-    meeting_id: int,
-    db: Session = Depends(get_db),
-):
+def delete_meeting(meeting_id: int, db: Session = Depends(get_db)):
     meeting = get_meeting_or_404(db, meeting_id)
     db.delete(meeting)
     db.commit()
+    return None
 
 
 @app.post(
@@ -315,10 +267,7 @@ def add_action(
     db: Session = Depends(get_db),
 ):
     get_meeting_or_404(db, meeting_id)
-    action = ActionItem(
-        meeting_id=meeting_id,
-        **payload.model_dump(),
-    )
+    action = ActionItem(meeting_id=meeting_id, **payload.model_dump())
     db.add(action)
     db.commit()
     db.refresh(action)
@@ -332,60 +281,36 @@ def update_action(
     db: Session = Depends(get_db),
 ):
     action = db.get(ActionItem, action_id)
-
     if action is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Action item not found",
-        )
+        raise HTTPException(status_code=404, detail="Action item not found")
 
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(action, key, value)
-
     db.commit()
     db.refresh(action)
     return action
 
 
 @app.delete("/api/actions/{action_id}", status_code=204)
-def delete_action(
-    action_id: int,
-    db: Session = Depends(get_db),
-):
+def delete_action(action_id: int, db: Session = Depends(get_db)):
     action = db.get(ActionItem, action_id)
-
     if action is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Action item not found",
-        )
-
+        raise HTTPException(status_code=404, detail="Action item not found")
     db.delete(action)
     db.commit()
+    return None
 
 
 @app.get("/api/search")
-def global_search(
-    q: str = Query(min_length=1),
-    db: Session = Depends(get_db),
-):
+def global_search(q: str = Query(min_length=1), db: Session = Depends(get_db)):
     needle = f"%{q.strip()}%"
-
-    statement = (
+    stmt = (
         select(Meeting, TranscriptSegment)
-        .join(
-            TranscriptSegment,
-            TranscriptSegment.meeting_id == Meeting.id,
-        )
+        .join(TranscriptSegment, TranscriptSegment.meeting_id == Meeting.id)
         .where(TranscriptSegment.text.ilike(needle))
-        .order_by(
-            Meeting.meeting_date.desc(),
-            TranscriptSegment.start_time.asc(),
-        )
+        .order_by(Meeting.meeting_date.desc(), TranscriptSegment.start_time.asc())
     )
-
-    rows = db.execute(statement).all()
-
+    rows = db.execute(stmt).all()
     return [
         {
             "meeting_id": meeting.id,
