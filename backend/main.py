@@ -1,3 +1,12 @@
+origins = [
+    x.strip()
+    for x in getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,https://fireflies-clone-dusky.vercel.app",
+    ).split(",")
+    if x.strip()
+]
+
 from datetime import date
 from os import getenv
 from typing import Optional
